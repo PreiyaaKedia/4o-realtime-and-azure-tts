@@ -8,7 +8,7 @@ from chainlit.input_widget import Select, Switch, Slider
 from uuid import uuid4
 from chainlit.logger import logger
 from realtime import RealtimeClient
-from azure_tts import Client as AzureTTSClient
+from azure_tts import text_to_speech_realtime
 from dotenv import load_dotenv
 from tools import tools
 
@@ -68,7 +68,7 @@ async def setup_openai_realtime(system_prompt: str):
                             sent_transcript = ''.join(collected_messages).strip()
                             collected_messages.clear()
                             # chunk = await AzureTTSClient.text_to_speech_realtime(speech_synthesizer = speech_synthesizer, text = sent_transcript, voice = voice)
-                            chunk = await AzureTTSClient.text_to_speech_realtime(speech_synthesizer=speech_synthesizer, text=sent_transcript, voice= voice)
+                            chunk = await text_to_speech_realtime(speech_synthesizer=speech_synthesizer, text=sent_transcript, voice= voice)
                             await cl.context.emitter.send_audio_chunk(cl.OutputAudioChunk(mimeType="audio/wav", data=chunk, track=cl.user_session.get("track_id")))
             if 'arguments' in delta:
                 arguments = delta['arguments']  # string, function arguments added
