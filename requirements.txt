@@ -6,6 +6,5 @@ plotly
 websockets
 pydantic==2.10.1
 azure-identity==1.19.0
-azure-search-documents
 azure-cognitiveservices-speech
 aiohttp
