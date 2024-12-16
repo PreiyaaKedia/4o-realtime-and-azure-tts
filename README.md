@@ -95,6 +95,8 @@ Open the terminal and navigate to the src folder of the repository. Then run the
      http://localhost:8000/
     ```
 
+4. Use username as "raj" and password as "pass123" to login to the application.
+
 ### Option 2: Run the application in a Docker container
 
 1. Navigate to the src folder of the repository
