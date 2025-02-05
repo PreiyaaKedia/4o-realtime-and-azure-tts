@@ -125,7 +125,7 @@ async def setup_openai_realtime(system_prompt: str):
         
     
     openai_realtime.on('conversation.updated', handle_conversation_updated)
-    openai_realtime.on('conversation.item.completed', handle_conversation_interrupt_azure_sdk)
+    openai_realtime.on('conversation.item.completed', handle_item_completed)
     openai_realtime.on('conversation.interrupted', handle_conversation_interrupt)
     openai_realtime.on('conversation.item.input_audio_transcription.completed', handle_input_audio_transcription_completed)
     openai_realtime.on('error', handle_error)
