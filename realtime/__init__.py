@@ -16,6 +16,11 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Optional
 import platform
+import torch
+from vad_iterator import VADIterator, int2float, float2int
+import noisereduce as nr
+from denoiser import pretrained  
+from denoiser.dsp import convert_audio 
 from importlib.metadata import version
 from aiohttp import ClientSession, WSMsgType, WSServerHandshakeError, ClientTimeout
 from azure.core.credentials import AzureKeyCredential
@@ -209,8 +214,10 @@ class RealtimeConversation:
         'conversation.item.input_audio_transcription.completed': lambda self, event: self._process_input_audio_transcription_completed(event),
         'input_audio_buffer.speech_started': lambda self, event: self._process_speech_started(event),
         'input_audio_buffer.speech_stopped': lambda self, event, input_audio_buffer: self._process_speech_stopped(event, input_audio_buffer),
+        # 'response.create': lambda self, event: self._process_response_created(event), ## Added a new response.create event
         'response.created': lambda self, event: self._process_response_created(event),
         'response.output_item.added': lambda self, event: self._process_output_item_added(event),
+        'response.done': lambda self, event: self._process_output_item_done(event), ## Added a new response.done event
         'response.output_item.done': lambda self, event: self._process_output_item_done(event),
         'response.content_part.added': lambda self, event: self._process_content_part_added(event),
         'response.audio_transcript.delta': lambda self, event: self._process_audio_transcript_delta(event),
@@ -424,6 +431,7 @@ class RealtimeClient(RealtimeEventHandler):
     def __init__(self, system_prompt: str, temperature = 0.8):
         super().__init__()
         self.system_prompt = system_prompt
+        self.vad_model, _ = torch.hub.load("snakers4/silero-vad", "silero_vad")
         self.default_session_config = {
             "modalities": ["text", "audio"],
             "instructions": self.system_prompt,
@@ -431,17 +439,26 @@ class RealtimeClient(RealtimeEventHandler):
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
             "input_audio_transcription": { "model": 'whisper-1'},
-            "turn_detection": { "type": 'server_vad' },
+            "turn_detection":  { "type": 'none' },
             "tools": [],
             "tool_choice": "auto",
             "temperature": temperature,
             "max_response_output_tokens": 4096,
         }
+        self.vad_iterator = VADIterator(
+            self.vad_model,
+            threshold=0.8,
+            sampling_rate=16000,
+            min_silence_duration_ms=150,
+            speech_pad_ms=100
+            )
+        self.custom_vad = True
+        # self.nr_model = pretrained.dns64().eval()
         self.session_config = {}
         self.transcription_models = [{"model": "whisper-1"}]
         self.default_server_vad_config = {
-            "type": "server_vad",
-            "threshold": 0.5,
+            "type": "none",
+            "threshold": 0.8,
             "prefix_padding_ms": 300,
             "silence_duration_ms": 200,
         }
@@ -496,6 +513,7 @@ class RealtimeClient(RealtimeEventHandler):
         return item, delta
 
     def _on_speech_started(self, event):
+        logger.info("Speech started")
         self._process_event(event)
         self.dispatch("conversation.interrupted", event)
 
@@ -633,42 +651,68 @@ class RealtimeClient(RealtimeEventHandler):
 
     async def append_input_audio(self, array_buffer):
         if len(array_buffer) > 0:
-            await self.realtime.send("input_audio_buffer.append", {
-                "audio": array_buffer_to_base64(np.array(array_buffer)),
-            })
-            self.input_audio_buffer.extend(array_buffer)
+            if self.custom_vad: 
+                for i in range(0, len(array_buffer), 1024): 
+                    chunk = array_buffer[i:i+1024] 
+                    chunk = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                    vad_output = self.vad_iterator(torch.from_numpy(chunk)) 
+                    if vad_output is not None and vad_output == "INTERRUPT_TTS": 
+                        print("Speech Detected") 
+                        self.dispatch("conversation.interrupted", None) 
+                        continue 
+                    if vad_output is not None and len(vad_output) != 0: 
+                        print("vad output going to Realtime") 
+                        try:
+                            await self.realtime.send("response.cancel")
+                        except:
+                            pass
+                        array = np.concatenate(vad_output) 
+                        await self.realtime.send("input_audio_buffer.append", { 
+                                             "audio": array_buffer_to_base64(array), 
+                                             }) 
+                        self.input_audio_buffer.extend(array) 
+                        await self.create_response()
+                        self.vad_iterator.reset_buffer()
+
+            else:  
+                # # Convert the data to numpy array   
+                audio_data = np.frombuffer(array_buffer, dtype=np.int16)
+                # # Ensure audio data is 2D before processing
+                # if audio_data.ndim == 1:
+                #     audio_data = audio_data[np.newaxis, :]
+                # print("Processing audio data with deepnoise")
+                #  # Convert input audio to the model's expected format  
+                # audio_input = torch.from_numpy(audio_data).float().transpose(0, 1)  
+                # audio_input = convert_audio(audio_input, 16000, self.nr_model.sample_rate, self.nr_model.chin)  
+                # # Perform noise reduction  
+                # with torch.no_grad():  
+                #     enhanced_audio = self.nr_model(audio_input[None])[0] 
+                # # Convert the output to numpy array and send to output stream  
+                # reduced_noise_bytes = enhanced_audio.transpose(0, 1).numpy().flatten().tobytes() 
+                reduced_noise_bytes = array_buffer
+                # Apply noise reduction  
+                reduced_noise = nr.reduce_noise(y=audio_data, sr=16000)  
+                # Convert back to bytes  
+                reduced_noise_bytes = reduced_noise.astype(np.int16).tobytes()
+                # print("Sending data to realtime API for processing")    
+                await self.realtime.send("input_audio_buffer.append", {
+                    "audio": array_buffer_to_base64(np.array(reduced_noise_bytes)),
+                })
+                self.input_audio_buffer.extend(reduced_noise_bytes)
         return True
 
     async def create_response(self):
-        if self.get_turn_detection_type() is None and len(self.input_audio_buffer) > 0:
+        turn_detection = self.get_turn_detection_type()
+        if turn_detection == "none" and len(self.input_audio_buffer) > 0:
             await self.realtime.send("input_audio_buffer.commit")
             self.conversation.queue_input_audio(self.input_audio_buffer)
-            self.input_audio_buffer = bytearray()
+            # self.input_audio_buffer = bytearray()
         await self.realtime.send("response.create")
         return True
-
-    async def cancel_response(self, id=None, sample_count=0):
-        if not id:
-            await self.realtime.send("response.cancel")
-            return {"item": None}
-        else:
-            item = self.conversation.get_item(id)
-            if not item:
-                raise Exception(f'Could not find item "{id}"')
-            if item["type"] != "message":
-                raise Exception('Can only cancelResponse messages with type "message"')
-            if item["role"] != "assistant":
-                raise Exception('Can only cancelResponse messages with role "assistant"')
-            await self.realtime.send("response.cancel")
-            audio_index = next((i for i, c in enumerate(item["content"]) if c["type"] == "audio"), -1)
-            if audio_index == -1:
-                raise Exception("Could not find audio on item to cancel")
-            await self.realtime.send("conversation.item.truncate", {
-                "item_id": id,
-                "content_index": audio_index,
-                "audio_end_ms": int((sample_count / self.conversation.default_frequency) * 1000),
-            })
-            return {"item": item}
+    
+    async def cancel_response(self):
+        await self.realtime.send("response.cancel")
+        return True
 
     async def wait_for_next_item(self):
         event = await self.wait_for_next("conversation.item.appended")

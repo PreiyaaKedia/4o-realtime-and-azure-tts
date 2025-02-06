@@ -17,7 +17,7 @@ search_client = SearchClient(
 
 fetch_relevant_documents_def = {
     "name": "fetch_relevant_documents",
-    "description": "Fetch relevant documents for a query",
+    "description": "Use this tool to get any information on JEE/NEET Batch details, schedule details, teacher details or any academic related information.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -30,8 +30,7 @@ fetch_relevant_documents_def = {
     }
 }
   
-async def fetch_relevant_documents_handler(params):
-    query = params['query']
+async def fetch_relevant_documents_handler(query):
     search_results = search_client.search(
         search_text=query,
         top=5,
@@ -44,3 +43,4 @@ async def fetch_relevant_documents_handler(params):
 tools = [
     (fetch_relevant_documents_def, fetch_relevant_documents_handler),
 ]
+tools = []
